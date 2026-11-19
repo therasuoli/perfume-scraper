@@ -1,6 +1,7 @@
 @echo off
 setlocal
-cd /d "%~dp0"	itle Perfume Scraper Dashboard
+cd /d "%~dp0"
+echo Starting Perfume Scraper Dashboard...
 python -m pip install -e .
 if errorlevel 1 (
   echo.
@@ -9,3 +10,8 @@ if errorlevel 1 (
   exit /b 1
 )
 python -m perfume_scraper.ui_server
+if errorlevel 1 (
+  echo Dashboard exited with an error.
+  pause
+)
+endlocal
