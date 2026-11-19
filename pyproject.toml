@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "perfume-scraper"
+version = "0.4.0"
+description = "Educational multi-site perfume product discovery with local visual dashboard"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Hadi Rasouli" }]
+
+dependencies = [
+  "requests>=2.31",
+  "beautifulsoup4>=4.12",
+  "openpyxl>=3.1",
+  "PyYAML>=6.0",
+  "urllib3>=1.26"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[project.scripts]
+perfume-scraper = "perfume_scraper.cli:main"
+perfume-scraper-ui = "perfume_scraper.ui_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+perfume_scraper = ["web/*.html", "web/*.css", "web/*.js"]
