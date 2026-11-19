@@ -123,10 +123,70 @@ def load_store_sources(workbook, regions='all', selection=''):
     return cleaned
 
 def _get(session,url):
+    """Adaptive request strategy: retry transient errors with longer timeouts and backoff.
+    Respects server throttling; does not bypass access controls or CAPTCHA.
+    """
+    last_error=None
+    for attempt, timeout in enumerate((18, 28, 40), 1):
+        try:
+            r=session.get(url,timeout=timeout,allow_redirects=True)
+            if r.status_code in (429, 503):
+                wait=min(2 ** attempt, 12)
+                LOG.warning('محدودیت موقت %s (HTTP %s)، مکث %ss',url,r.status_code,wait)
+                if attempt<3: time.sleep(wait); continue
+            r.raise_for_status()
+            try: session._perfume_last_error=None
+            except Exception: pass
+            return r
+        except requests.RequestException as e:
+            last_error=e
+            if attempt<3:
+                wait=min(1.2 * (2 ** (attempt-1)), 6)
+                LOG.warning('تلاش %s/3 ناموفق %s: %s؛ تلاش مجدد پس از %ss',attempt,url,e,wait)
+                time.sleep(wait)
+    try: session._perfume_last_error=f'{type(last_error).__name__}: {last_error}'
+    except Exception: pass
+    LOG.warning('دریافت پس از ۳ تلاش ناموفق %s: %s',url,last_error)
+    return None
+
+
+def translate_to_persian(text, endpoint=None, api_key=None, timeout=18):
+    """Optional LibreTranslate-compatible translation. Original text is always retained.
+    Set LIBRETRANSLATE_URL (and optionally LIBRETRANSLATE_API_KEY) to enable.
+    """
+    text=_clean_text(text)
+    if not text: return ''
+    endpoint=(endpoint or __import__('os').environ.get('LIBRETRANSLATE_URL','')).strip()
+    api_key=api_key or __import__('os').environ.get('LIBRETRANSLATE_API_KEY','')
+    if not endpoint: return ''
     try:
-        r=session.get(url,timeout=22,allow_redirects=True); r.raise_for_status(); return r
-    except requests.RequestException as e:
-        LOG.warning('دریافت نشد %s: %s',url,e); return None
+        payload={'q':text,'source':'auto','target':'fa','format':'text'}
+        if api_key: payload['api_key']=api_key
+        response=requests.post(endpoint.rstrip('/')+'/translate',json=payload,timeout=timeout)
+        response.raise_for_status()
+        translated=(response.json() or {}).get('translatedText','')
+        return _clean_text(translated)
+    except Exception as exc:
+        LOG.warning('ترجمه خودکار در دسترس نیست: %s',exc)
+        return ''
+
+
+def translate_products(items, progress_callback=None):
+    """Add Persian translation fields without overwriting source-language fields."""
+    translated_count=0
+    cache={}
+    for idx,item in enumerate(items,1):
+        for field in ('short_description','long_description','description'):
+            original=item.get(field) or ''
+            target=f'{field}_fa'
+            if original and not item.get(target):
+                key=_clean_text(original)
+                if key not in cache: cache[key]=translate_to_persian(key)
+                item[target]=cache[key]
+                if item[target]: translated_count+=1
+        item['translation_status']='translated' if any(item.get(f'{f}_fa') for f in ('short_description','long_description','description')) else ('unavailable' if any(item.get(f) for f in ('short_description','long_description','description')) else 'empty')
+        if progress_callback and idx%10==0: progress_callback(idx,len(items),translated_count)
+    return translated_count
 
 def _walk_jsonld(obj):
     if isinstance(obj,list):
@@ -290,7 +350,7 @@ def scrape_url(start_url,site_name=None,limit=0,download_images=False,image_dir=
     # Add typical shop/catalog endpoints, harmless if unavailable.
     for path in ('/shop/','/products/','/collections/all','/product-category/perfume/','/category/perfume/','/perfumes/','/عطر/'):
         queue.append(urljoin(base,path))
-    stats={'pages_checked':0,'products_found':0,'errors':0}
+    stats={'pages_checked':0,'products_found':0,'errors':0,'error_details':[]}
     while queue and len(seen_pages)<max_pages and (not limit or len(products)<limit):
         if cancel_event is not None and cancel_event.is_set(): break
         page=queue.pop(0)
@@ -299,6 +359,7 @@ def scrape_url(start_url,site_name=None,limit=0,download_images=False,image_dir=
         r=_get(s,page)
         if not r:
             stats['errors']+=1
+            stats['error_details'].append({'url':page,'reason':getattr(s,'_perfume_last_error','request failed after retries')})
             if progress_callback: progress_callback({'event':'page','site':site_name,'page':page,'pages_checked':stats['pages_checked'],'products_found':len(products),'products_preview':list(products.values())[-30:],'errors':stats['errors'],'status':'error'})
             continue
         if 'html' not in r.headers.get('content-type','text/html').lower():
