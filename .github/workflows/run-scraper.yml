@@ -40,6 +40,11 @@ on:
         default: 'xlsx'
         type: choice
         options: [xlsx, csv, json]
+      enrich_details:
+        description: 'تکمیل توضیحات کوتاه و بلند از صفحات محصول'
+        required: true
+        default: true
+        type: boolean
       download_images:
         description: 'دانلود تصاویر محصول (حجم خروجی بیشتر می‌شود)'
         required: true
@@ -59,9 +64,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
           cache: pip
@@ -82,6 +87,18 @@ jobs:
           PY
       - name: Install scraper
         run: python -m venv .venv && .venv/bin/python -m pip install --upgrade pip && .venv/bin/python -m pip install . && .venv/bin/python -m pip check
+      - name: Verify source data files
+        run: |
+          mkdir -p run-output
+          {
+            echo "Repository root: $PWD"
+            echo "Expected store workbook: data/perfume-online-stores.xlsx"
+            echo "Expected brand workbook: data/perfume-brands-by-country.xlsx"
+            echo "Data directory listing:"
+            ls -lah data || true
+          } | tee run-output/preflight.txt
+          test -f data/perfume-online-stores.xlsx || { echo "ERROR: Missing data/perfume-online-stores.xlsx. Upload the data/ folder to the repository root."; exit 1; }
+          test -f data/perfume-brands-by-country.xlsx || { echo "ERROR: Missing data/perfume-brands-by-country.xlsx. Upload the data/ folder to the repository root."; exit 1; }
       - name: Run scraper
         env:
           SOURCE_LIST: ${{ inputs.source_list }}
@@ -92,10 +109,14 @@ jobs:
           MAX_PAGES: ${{ inputs.max_pages }}
           FORMAT: ${{ inputs.output_format }}
           DOWNLOAD_IMAGES: ${{ inputs.download_images }}
+          ENRICH_DETAILS: ${{ inputs.enrich_details }}
         run: |
           mkdir -p run-output
+          set -o pipefail
           IMAGE_FLAG=''
+          DETAIL_FLAG=''
           if [ "$DOWNLOAD_IMAGES" = 'true' ]; then IMAGE_FLAG='--download-images'; fi
+          if [ "$ENRICH_DETAILS" = 'true' ]; then DETAIL_FLAG='--enrich-details'; fi
           .venv/bin/perfume-scraper \
             --source-list "$SOURCE_LIST" \
             --urls "$URLS" \
@@ -109,12 +130,13 @@ jobs:
             --delay 1.5 \
             --output run-output \
             $IMAGE_FLAG \
-            --verbose
+            $DETAIL_FLAG \
+            --verbose 2>&1 | tee run-output/scrape.log
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: perfume-scraper-results-${{ github.run_number }}
           path: run-output/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
