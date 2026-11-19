@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "perfume-scraper"
-version = "0.5.0"
+version = "0.6.0"
 description = "Educational multi-site perfume product discovery with local visual dashboard"
 readme = "README.md"
 requires-python = ">=3.10"
