@@ -10,10 +10,13 @@
 - انتخاب چند فروشگاه با جستجو، انتخاب همه و پاک کردن انتخاب
 - وارد کردن چند لینک دستی برای سایت یا صفحه مشخص
 - استخراج JSON-LD، کارت‌های رایج محصول و Microdata
-- فیلدهای نام، برند، قیمت، ارز، توضیح، موجودی، URL محصول و URL تصویر
+- فیلدهای نام محصول، برند، قیمت، ارز، توضیح کوتاه و بلند، موجودی، لینک محصول و لینک تصویر
+- تکمیل خودکار اطلاعات با مراجعه اختیاری به صفحه محصول (نام، برند، تصویر، قیمت و توضیحات)
 - پیش‌نمایش محصولات و تصویرها در داشبورد
 - توقف خزش در حین اجرا
 - دانلود اختیاری تصاویر
+- پیش‌نمایش توضیح کوتاه و بازکردن توضیحات کامل هر محصول در داشبورد
+- دانلود یک‌جای تمام خروجی‌ها، گزارش‌ها و تصاویر به صورت ZIP از داشبورد
 - خروجی Excel، CSV و JSON به همراه `run-report.json` و `source-summary.csv`
 - Retry برای خطاهای موقت HTTP و تست‌های آفلاین
 - GitHub Actions با Python 3.10 تا 3.13
@@ -51,7 +54,9 @@ perfume-scraper-ui
 - **حد صفحات:** تعداد صفحات مجاز بررسی در هر سایت
 - **فاصله درخواست:** برای کاهش فشار به سایت‌ها مقدار مناسب تعیین کنید
 - **فرمت:** Excel / CSV / JSON
+- **تکمیل توضیحات محصول:** بازدید اختیاری از صفحات محصولات برای دریافت توضیحات کوتاه و کامل، برند و تصویر؛ حداکثر ۴۰ صفحه محصول از هر فروشگاه در این مرحله برای کاهش فشار روی سایت
 - **دانلود تصویر:** ذخیره فایل تصویر در فولدر `images` داخل خروجی اجرا
+- **دانلود خروجی‌ها:** فهرست فایل‌ها را در پنل باز کنید یا از «دانلود همه خروجی‌ها ZIP» استفاده کنید
 
 
 ## اجرای GitHub Actions
@@ -73,6 +78,7 @@ perfume-scraper-ui
 | `limit` | تعداد محصول از هر سایت؛ صفر بدون محدودیت |
 | `max_pages` | سقف صفحات هر سایت |
 | `output_format` | xlsx، csv یا json |
+| `enrich_details` | مراجعه به صفحه محصول برای تکمیل توضیحات کوتاه/بلند، تصویر، برند و قیمت |
 | `download_images` | دانلود تصاویر محصول و قرار دادن در Artifact |
 
 
@@ -85,7 +91,7 @@ perfume-scraper --source-list all_stores --stores-xlsx data/perfume-online-store
 لینک دستی:
 
 ```bash
-perfume-scraper --source-list manual_urls --urls "https://example.com/perfumes" --limit 10 --max-pages 12 --format xlsx --output run-output
+perfume-scraper --source-list manual_urls --urls "https://example.com/perfumes" --limit 10 --max-pages 12 --format xlsx --output run-output --enrich-details
 ```
 
 
@@ -125,6 +131,7 @@ python -m pytest -vv
 ```text
 .github/workflows/    GitHub Actions
 src/perfume_scraper/ Scraper + Dashboard local server + web UI
-src/perfume_scraper/web/ UI assets (HTML/CSS/JS)	ests/               Offline test suite
+src/perfume_scraper/web/ UI assets (HTML/CSS/JS)
+tests/                Offline test suite
 data/                 Source Excel workbooks
 ```
