@@ -1,6 +1,6 @@
 """Local browser dashboard for the perfume scraper. Only binds to localhost by default."""
 from __future__ import annotations
-import argparse, csv, json, threading, webbrowser
+import argparse, csv, json, threading, webbrowser, zipfile, io
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, unquote
@@ -23,7 +23,7 @@ STATE = {
     'state': 'idle', 'started_at': None, 'finished_at': None, 'current_site': '',
     'sources_total': 0, 'sources_done': 0, 'pages_checked': 0, 'products_found': 0,
     'errors': 0, 'cancel_requested': False, 'output_dir': '', 'output_file': '',
-    'source_results': [], 'products': [], 'logs': [], 'message': 'آماده اجرا',
+    'source_results': [], 'products': [], 'logs': [], 'details_checked': 0, 'details_total': 0, 'message': 'آماده اجرا',
 }
 WORKER = None
 
@@ -69,7 +69,7 @@ def _worker_run(config):
     with STATE_LOCK:
         STATE.update({'state':'running','started_at':started.isoformat(timespec='seconds'),'finished_at':None,
             'current_site':'','sources_total':0,'sources_done':0,'pages_checked':0,'products_found':0,
-            'errors':0,'cancel_requested':False,'output_dir':str(outdir.relative_to(ROOT)) if outdir.is_relative_to(ROOT) else str(outdir),
+            'errors':0,'details_checked':0,'details_total':0,'cancel_requested':False,'output_dir':str(outdir.relative_to(ROOT)) if outdir.is_relative_to(ROOT) else str(outdir),
             'output_file':'','source_results':[],'products':[],'message':'در حال آماده‌سازی منابع'})
     _log('اجرای جدید آغاز شد')
     try:
@@ -96,20 +96,29 @@ def _worker_run(config):
                 STATE['source_results']=list(source_reports)
             _log(f"شروع منبع: {source['name']} — {source['url']}")
             def page_callback(event, src_name=source['name']):
+                event_type=event.get('event','page')
                 with STATE_LOCK:
-                    STATE['pages_checked']+=1
+                    if event_type=='detail':
+                        STATE['details_checked']+=1
+                        STATE['details_total']=max(STATE['details_total'],int(event.get('details_total',0)))
+                    else:
+                        STATE['pages_checked']+=1
+                        if source_reports and source_reports[-1].get('name')==src_name:
+                            source_reports[-1].update({'pages_checked':event.get('pages_checked',0),'products_found':event.get('products_found',0),'errors':event.get('errors',0)})
+                            STATE['source_results']=list(source_reports)
                     STATE['products_found']=len(all_products)+int(event.get('products_found',0))
-                    STATE['products']=all_products[-120:]+list(event.get('products_preview',[]))[-30:]
-                    if source_reports and source_reports[-1].get('name')==src_name:
-                        source_reports[-1].update({'pages_checked':event.get('pages_checked',0),'products_found':event.get('products_found',0),'errors':event.get('errors',0)})
-                        STATE['source_results']=list(source_reports)
+                    preview=list(event.get('products_preview',[]))
+                    if preview: STATE['products']=all_products[-120:]+preview[-30:]
                     STATE['current_site']=src_name
-                page_status=event.get('status','running')
-                _log(f"صفحه {event.get('pages_checked',0)}: {event.get('page','')} | محصولات این سایت: {event.get('products_found',0)} | {page_status}", 'warning' if page_status=='error' else 'info')
+                if event_type=='detail':
+                    _log(f"تکمیل اطلاعات محصول: {event.get('details_checked',0)}/{event.get('details_total',0)} — {event.get('page','')}")
+                else:
+                    page_status=event.get('status','running')
+                    _log(f"صفحه {event.get('pages_checked',0)}: {event.get('page','')} | محصولات این سایت: {event.get('products_found',0)} | {page_status}", 'warning' if page_status=='error' else 'info')
             try:
                 got,stats=scrape_url(source['url'],source['name'],int(config.get('limit_per_site',10)),
                     bool(config.get('download_images')),outdir/'images',float(config.get('delay',1.3)),
-                    int(config.get('max_pages',12)),session=session,progress_callback=page_callback,cancel_event=CANCEL_EVENT)
+                    int(config.get('max_pages',12)),session=session,progress_callback=page_callback,cancel_event=CANCEL_EVENT,enrich_details=bool(config.get('enrich_details',True)))
                 for item in got: item['source_type']=source.get('source_type','online_store')
                 source_row.update(stats); source_row['status']='cancelled' if CANCEL_EVENT.is_set() else ('partial' if got and stats.get('errors',0) else ('ok' if got else ('error' if stats.get('errors',0) else 'no_products')))
                 all_products.extend(got)
@@ -180,13 +189,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if base.exists():
                 for f in sorted(base.rglob('*')):
                     if f.is_file() and f.resolve().is_relative_to(base): found.append({'name':str(f.relative_to(ROOT)),'size':f.stat().st_size})
-            self._json({'files':found[-250:]}); return
+            self._json({'files':found[-500:]}); return
+        if path=='/api/download-zip':
+            base=OUTPUT_ROOT.resolve()
+            if not base.exists() or not any(x.is_file() for x in base.rglob('*')):
+                self._json({'error':'هنوز فایل خروجی برای بسته‌بندی وجود ندارد'},404); return
+            stream=io.BytesIO()
+            with zipfile.ZipFile(stream,'w',zipfile.ZIP_DEFLATED) as archive:
+                for f in base.rglob('*'):
+                    if f.is_file() and f.resolve().is_relative_to(base): archive.write(f,f.relative_to(base))
+            payload=stream.getvalue(); self.send_response(200); self.send_header('Content-Type','application/zip'); self.send_header('Content-Disposition','attachment; filename="perfume-scraper-outputs.zip"'); self.send_header('Content-Length',str(len(payload))); self.end_headers(); self.wfile.write(payload); return
         if path.startswith('/files/'): 
-            rel=path[len('/files/'):]
+            rel=unquote(path[len('/files/'):])
             target=(ROOT/rel).resolve()
             base=OUTPUT_ROOT.resolve()
             if not target.is_relative_to(base) or not target.is_file(): self._json({'error':'not found'},404); return
-            data=target.read_bytes(); self.send_response(200); self.send_header('Content-Type','application/octet-stream'); self.send_header('Content-Disposition',f'attachment; filename="{target.name}"'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
+            data=target.read_bytes(); mime='application/octet-stream'
+            if target.suffix.lower() in ('.jpg','.jpeg'): mime='image/jpeg'
+            elif target.suffix.lower()=='.png': mime='image/png'
+            elif target.suffix.lower()=='.webp': mime='image/webp'
+            elif target.suffix.lower()=='.gif': mime='image/gif'
+            self.send_response(200); self.send_header('Content-Type',mime); self.send_header('Content-Disposition',f'attachment; filename="{target.name}"'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
         if path=='/' or path=='/index.html':
             data=(WEB_ROOT/'index.html').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
         if path in ('/app.js','/style.css'):
