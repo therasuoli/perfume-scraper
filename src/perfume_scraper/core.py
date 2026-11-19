@@ -136,6 +136,87 @@ def _walk_jsonld(obj):
         for v in obj.values():
             if isinstance(v,(dict,list)): yield from _walk_jsonld(v)
 
+def _clean_text(value):
+    if value is None: return ''
+    if isinstance(value, (list, tuple)): value=' '.join(str(x) for x in value)
+    text=BeautifulSoup(str(value), 'html.parser').get_text(' ', strip=True)
+    return re.sub(r'\s+', ' ', text).strip()
+
+def _split_description(description):
+    text=_clean_text(description)
+    if not text: return '', ''
+    short=text[:320].strip()
+    long=text if len(text)>320 else ''
+    return short, long
+
+def _description_from_soup(soup):
+    short=''
+    for selector in ('meta[name="description"]','meta[property="og:description"]','meta[name="twitter:description"]'):
+        node=soup.select_one(selector)
+        if node and node.get('content'):
+            short=_clean_text(node.get('content')); break
+    long=''
+    selectors=(
+        '[itemprop="description"]','.woocommerce-product-details__short-description',
+        '.woocommerce-Tabs-panel--description','.product-description','.product__description',
+        '.product-description-content','.product-details__description','.description',
+        '#description','.tab-content .description','.product__content .rte',
+    )
+    for selector in selectors:
+        node=soup.select_one(selector)
+        if node:
+            candidate=_clean_text(node)
+            if len(candidate)>20:
+                long=candidate; break
+    if not short and long: short=long[:320]
+    return short, long
+
+def enrich_product_details(session, items, progress_callback=None, cancel_event=None, max_details=40):
+    """Visit product pages to fill missing product descriptions, names, brands and images."""
+    enriched=0
+    candidates=[x for x in items if x.get('product_url') and (not x.get('long_description') or not x.get('image_url') or not x.get('brand'))]
+    for index,item in enumerate(candidates[:max_details],1):
+        if cancel_event is not None and cancel_event.is_set(): break
+        url=item.get('product_url','')
+        response=_get(session,url)
+        if not response or 'html' not in response.headers.get('content-type','text/html').lower():
+            continue
+        soup=BeautifulSoup(response.text,'html.parser')
+        for script in soup.select('script[type="application/ld+json"]'):
+            try: parsed=json.loads(script.string or script.get_text())
+            except Exception: continue
+            for structured in _walk_jsonld(parsed):
+                product=_product_from_jsonld(structured,url,item.get('site',''))
+                if product:
+                    for key in ('name','brand','price','currency','image_url','availability','short_description','long_description'):
+                        if product.get(key) and (not item.get(key) or (key in ('short_description','long_description') and len(product.get(key,''))>len(item.get(key,'')))):
+                            item[key]=product[key]
+                    break
+        title=soup.select_one('h1[itemprop="name"],h1.product_title,h1.product-title,h1')
+        if title:
+            title_text=_clean_text(title)
+            if title_text and (not item.get('name') or len(item.get('name',''))<len(title_text)): item['name']=title_text
+        short,long=_description_from_soup(soup)
+        if short and (not item.get('short_description') or len(short)>len(item.get('short_description',''))): item['short_description']=short
+        if long and (not item.get('long_description') or len(long)>len(item.get('long_description',''))): item['long_description']=long
+        item['description']=item.get('long_description') or item.get('short_description') or item.get('description','')
+        if not item.get('image_url'):
+            image=_page_image(soup,url)
+            if not image:
+                node=soup.select_one('img[itemprop="image"],.woocommerce-product-gallery img,.product-gallery img,.product-image img,img.product-image,img#product-image')
+                if node:
+                    image=node.get('data-src') or node.get('data-lazy-src') or node.get('src') or ''
+                    image=urljoin(url,image) if image else ''
+            if image: item['image_url']=_url(image)
+        if not item.get('brand'):
+            brand_node=soup.select_one('[itemprop="brand"] [itemprop="name"], [itemprop="brand"],.product-brand,.brand-name')
+            if brand_node: item['brand']=_clean_text(brand_node.get('content') or brand_node)
+        price_node=soup.select_one('[itemprop="price"],.price .amount,.product-price,.price')
+        if not item.get('price') and price_node: item['price']=_clean_text(price_node.get('content') or price_node)
+        enriched+=1
+        if progress_callback: progress_callback({'event':'detail','site':item.get('site',''),'page':url,'details_checked':index,'details_total':min(len(candidates),max_details),'products_found':len(items),'status':'detail'})
+    return enriched
+
 def _product_from_jsonld(data,page_url,site_name):
     typ=data.get('@type',[]); typ=[typ] if isinstance(typ,str) else typ
     if not any('product' in str(t).lower() for t in typ): return None
@@ -144,7 +225,7 @@ def _product_from_jsonld(data,page_url,site_name):
     offers=data.get('offers') or {}; offers=offers[0] if isinstance(offers,list) and offers else offers
     image=data.get('image') or ''; image=image[0] if isinstance(image,list) and image else image
     brand=data.get('brand') or {}; brand=brand.get('name','') if isinstance(brand,dict) else brand
-    return {'site':site_name,'name':str(name).strip(),'brand':str(brand or ''),'price':str(offers.get('price','') if isinstance(offers,dict) else ''),'currency':str(offers.get('priceCurrency','') if isinstance(offers,dict) else ''),'product_url':_url(urljoin(page_url,str(data.get('url') or page_url))),'image_url':_url(urljoin(page_url,str(image))) if image else '', 'description':str(data.get('description','')).strip(),'availability':str(offers.get('availability','') if isinstance(offers,dict) else ''),'image_path':''}
+    return {'site':site_name,'name':str(name).strip(),'brand':str(brand or ''),'price':str(offers.get('price','') if isinstance(offers,dict) else ''),'currency':str(offers.get('priceCurrency','') if isinstance(offers,dict) else ''),'product_url':_url(urljoin(page_url,str(data.get('url') or page_url))),'image_url':_url(urljoin(page_url,str(image))) if image else '', 'description':_clean_text(data.get('description','')),'short_description':_split_description(data.get('description',''))[0],'long_description':_split_description(data.get('description',''))[1],'availability':str(offers.get('availability','') if isinstance(offers,dict) else ''),'image_path':''}
 
 def _page_image(soup,page_url):
     for selector,attr in (('meta[property="og:image"]','content'),('meta[name="twitter:image"]','content'),('meta[property="twitter:image"]','content')):
@@ -165,18 +246,18 @@ def _cards(soup,page_url,site_name):
         name=title.get_text(' ',strip=True) if title else (a.get('title','') if a else '')
         if not name and a: name=a.get_text(' ',strip=True)
         if not name or not a: continue
-        price=c.select_one('.price,.amount,[itemprop=price],[data-price]'); img=c.select_one('img')
+        price=c.select_one('.price,.amount,[itemprop=price],[data-price]'); desc=c.select_one('.product-description,.description,.short-description,.product-excerpt,[itemprop=description],.woocommerce-product-details__short-description'); img=c.select_one('img')
         image=(img.get('data-srcset') or img.get('srcset') or img.get('data-src') or img.get('data-lazy-src') or img.get('data-original') or img.get('data-original-src') or img.get('src') or '').split(',')[0].strip().split(' ')[0] if img else ''
         href=a.get('href')
         if not href: continue
-        out.append({'site':site_name,'name':name,'brand':'','price':price.get_text(' ',strip=True) if price else (price.get('content','') if price else ''),'currency':'','product_url':_url(urljoin(page_url,href)),'image_url':_url(urljoin(page_url,image)) if image else '', 'description':'','availability':'','image_path':''})
+        out.append({'site':site_name,'name':name,'brand':'','price':price.get_text(' ',strip=True) if price else (price.get('content','') if price else ''),'currency':'','product_url':_url(urljoin(page_url,href)),'image_url':_url(urljoin(page_url,image)) if image else '', 'description':_clean_text(desc) if desc else '', 'short_description':_clean_text(desc)[:320] if desc else '', 'long_description':'','availability':'','image_path':''})
     # Product microdata even if card wrappers are non-standard
     for node in soup.select('[itemtype*=Product]'):
         name_node=node.select_one('[itemprop=name]'); url_node=node.select_one('[itemprop=url]') or node.select_one('a[href]')
         name=(name_node.get('content') or name_node.get_text(' ',strip=True)) if name_node else ''
         url=url_node.get('content') or url_node.get('href') if url_node else page_url
         if name and url:
-            out.append({'site':site_name,'name':name,'brand':'','price':'','currency':'','product_url':_url(urljoin(page_url,url)),'image_url':'','description':'','availability':'','image_path':''})
+            out.append({'site':site_name,'name':name,'brand':'','price':'','currency':'','product_url':_url(urljoin(page_url,url)),'image_url':'','description':'','short_description':'','long_description':'','availability':'','image_path':''})
     return out
 
 def _sitemap_urls(session,base,max_urls=150):
@@ -202,7 +283,7 @@ def _sitemap_urls(session,base,max_urls=150):
             if len(found)>=max_urls: break
     return list(dict.fromkeys(found))[:max_urls]
 
-def scrape_url(start_url,site_name=None,limit=0,download_images=False,image_dir='run-output/images',delay=1.0,max_pages=40,session=None,progress_callback=None,cancel_event=None):
+def scrape_url(start_url,site_name=None,limit=0,download_images=False,image_dir='run-output/images',delay=1.0,max_pages=40,session=None,progress_callback=None,cancel_event=None,enrich_details=False):
     start_url=_url(start_url); site_name=site_name or urlparse(start_url).netloc; s=session or create_session()
     base=f'{urlparse(start_url).scheme}://{urlparse(start_url).netloc}'
     queue=[start_url]; queue.extend(_sitemap_urls(s,base,max_pages)); seen_pages=set(); products={}
@@ -248,6 +329,8 @@ def scrape_url(start_url,site_name=None,limit=0,download_images=False,image_dir=
         if progress_callback: progress_callback({'event':'page','site':site_name,'page':page,'pages_checked':stats['pages_checked'],'products_found':len(products),'products_preview':list(products.values())[-30:],'errors':stats['errors'],'status':'running','queue':len(queue)})
         LOG.info('%s | pages %d/%d | products %d | queue %d',site_name,len(seen_pages),max_pages,len(products),len(queue))
     items=list(products.values())[:limit or None]
+    if enrich_details and items:
+        enrich_product_details(s,items,progress_callback=progress_callback,cancel_event=cancel_event,max_details=min(len(items),40))
     if download_images:
         for i,item in enumerate(items,1):
             if cancel_event is not None and cancel_event.is_set(): break
@@ -279,7 +362,7 @@ def enrich_brand(items,rows):
     return items
 def write_output(items,fmt,folder,filename='products'):
     folder=Path(folder); folder.mkdir(parents=True,exist_ok=True); p=folder/f'{filename}.{fmt}'
-    fields=list(items[0]) if items else ['site','name','brand','price','currency','product_url','image_url','description','availability','image_path','matched_brand','source_type']
+    fields=list(items[0]) if items else ['site','name','brand','price','currency','product_url','image_url','description','short_description','long_description','availability','image_path','matched_brand','source_type']
     if fmt=='json': p.write_text(json.dumps(items,ensure_ascii=False,indent=2),encoding='utf-8')
     elif fmt=='csv':
         with p.open('w',newline='',encoding='utf-8-sig') as f: w=csv.DictWriter(f,fieldnames=fields,extrasaction='ignore'); w.writeheader(); w.writerows(items)
