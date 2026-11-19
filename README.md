@@ -135,3 +135,25 @@ src/perfume_scraper/web/ UI assets (HTML/CSS/JS)
 tests/                Offline test suite
 data/                 Source Excel workbooks
 ```
+
+## Smart edition improvements
+- Adaptive retries and extended request timeouts for transient network/server errors. HTTP 429/503 are handled with backoff; access controls and CAPTCHA are not bypassed.
+- Animated dashboard analytics (pages/products and source health) with responsive canvas charts.
+- Optional Persian translation fields (`description_fa`, `short_description_fa`, `long_description_fa`) while preserving originals. Translation requires a LibreTranslate-compatible endpoint.
+
+### Optional translation setup
+Set environment variables before launching the dashboard:
+- `LIBRETRANSLATE_URL` — base URL for a LibreTranslate-compatible server (for example, your own instance URL).
+- `LIBRETRANSLATE_API_KEY` — optional key if your translation server requires one.
+
+Translation is opt-in in the dashboard. If no endpoint is configured, source text is preserved and translation fields remain empty. No external translation service is contacted by default.
+
+
+### Windows quick setup for translation
+In a Command Prompt window, set the endpoint for the LibreTranslate server you use:
+```bat
+set LIBRETRANSLATE_URL=https://your-libretranslate-server.example
+set LIBRETRANSLATE_API_KEY=your-key-if-required
+start-dashboard.bat
+```
+Replace the example URL and key with your translation provider's actual settings. The dashboard will keep original English text and add Persian fields when translation is enabled.
