@@ -1,3 +1,4 @@
+import pytest
 from pathlib import Path
 from threading import Event
 
@@ -6,6 +7,7 @@ import perfume_scraper.core as core
 STORES = Path(__file__).parents[1] / "data" / "perfume-online-stores.xlsx"
 
 
+@pytest.mark.skipif(not STORES.exists(), reason='Store workbook is not bundled in this ZIP')
 def test_store_source_regions_exist_and_load():
     all_sources = core.load_store_sources(STORES, "all")
     uae_sources = core.load_store_sources(STORES, "UAE")
@@ -15,6 +17,7 @@ def test_store_source_regions_exist_and_load():
     assert len(all_sources) >= len(uae_sources) + len(iran_sources)
 
 
+@pytest.mark.skipif(not STORES.exists(), reason='Store workbook is not bundled in this ZIP')
 def test_selected_store_source_filters_by_domain():
     uae = core.load_store_sources(STORES, "UAE")
     target = uae[0]
@@ -52,6 +55,7 @@ def test_scrape_cancel_event_prevents_page_requests(monkeypatch):
     assert not called
 
 
+@pytest.mark.skipif(not STORES.exists(), reason='Store workbook is not bundled in this ZIP')
 def test_local_dashboard_serves_ui_and_source_json():
     import json
     import threading
@@ -143,3 +147,11 @@ def test_dashboard_download_zip_returns_output_bundle(monkeypatch, tmp_path):
             assert "products.json" in payload.namelist()
     finally:
         server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+
+def test_dashboard_includes_live_analytics_and_translation_toggle():
+    from pathlib import Path
+    html=(Path(__file__).parent.parent/'src'/'perfume_scraper'/'web'/'index.html').read_text(encoding='utf8')
+    js=(Path(__file__).parent.parent/'src'/'perfume_scraper'/'web'/'app.js').read_text(encoding='utf8')
+    assert 'trendChart' in html and 'healthChart' in html
+    assert 'translateFa' in html and 'translate_fa' in js
