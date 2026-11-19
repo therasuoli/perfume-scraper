@@ -1,3 +1,4 @@
+import pytest
 import json
 from pathlib import Path
 from bs4 import BeautifulSoup
@@ -5,11 +6,13 @@ from perfume_scraper.core import _product_from_jsonld, load_sources, normalize, 
 
 WORKBOOK=Path(__file__).parents[1]/'data'/'perfume-brands-by-country.xlsx'
 
+@pytest.mark.skipif(not WORKBOOK.exists(), reason='Source workbook is not bundled in this ZIP')
 def test_workbook_has_eight_iranian_sources():
     sources=load_sources(WORKBOOK,'iranian')
     assert len(sources)==8
     assert any('toofunatr.com' in x['url'] for x in sources)
 
+@pytest.mark.skipif(not WORKBOOK.exists(), reason='Source workbook is not bundled in this ZIP')
 def test_all_sources_includes_brand_sites_and_iranian_shops():
     sources=load_sources(WORKBOOK,'all')
     assert len(sources)>8
@@ -62,3 +65,14 @@ def test_enrich_product_detail_page_extracts_descriptions_image_and_brand(monkey
     assert "Long perfume description" in product["long_description"]
     assert product["image_url"] == "https://demo.test/assets/product.webp"
     assert product["brand"] == "Test House"
+
+
+def test_translate_products_keeps_original_and_marks_unavailable(monkeypatch):
+    from perfume_scraper.core import translate_products
+    monkeypatch.delenv('LIBRETRANSLATE_URL', raising=False)
+    rows=[{'name':'Test perfume','description':'A floral fragrance'}]
+    count=translate_products(rows)
+    assert count == 0
+    assert rows[0]['description'] == 'A floral fragrance'
+    assert rows[0]['description_fa'] == ''
+    assert rows[0]['translation_status'] == 'unavailable'
