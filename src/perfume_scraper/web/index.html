@@ -8,8 +8,8 @@
 <body>
 <div class="app-shell">
   <aside class="sidebar">
-    <div class="brand"><div class="brand-mark">P<span>✦</span></div><div><strong>PERFUME SCRAPER</strong><small>پنل استخراج هوشمند</small></div></div>
-    <nav><a class="nav-item active" href="#dashboard"><span class="nav-icon">▦</span> داشبورد</a><a class="nav-item" href="#sources"><span class="nav-icon">◎</span> منابع استخراج</a><a class="nav-item" href="#monitor"><span class="nav-icon">◷</span> مانیتور عملیات</a><a class="nav-item" href="#results"><span class="nav-icon">▤</span> محصولات و خروجی</a></nav>
+    <div class="brand"><div class="brand-mark">P<span>✦</span></div><div><strong>PERFUME SCRAPER</strong><small>پنل استخراج هوشمند · v0.6.0</small></div></div>
+    <nav><a class="nav-item active" href="#dashboard"><span class="nav-icon">▦</span> داشبورد</a><a class="nav-item" href="#sources"><span class="nav-icon">◎</span> منابع استخراج</a><a class="nav-item" href="#monitor"><span class="nav-icon">◷</span> مانیتور عملیات</a><a class="nav-item" href="#results"><span class="nav-icon">▤</span> محصولات و خروجی</a><a class="nav-item" href="#databank"><span class="nav-icon">▣</span> سازنده بانک اطلاعات</a></nav>
     <div class="sidebar-bottom"><div class="mini-status"><span class="pulse-dot"></span><div><b>محیط محلی</b><small>ایمن روی دستگاه شما</small></div></div><div class="credit">Developed by <b>Hadi Rasouli</b><br><span>MIT License</span></div></div>
   </aside>
   <main class="main" id="dashboard">
@@ -21,6 +21,7 @@
       <article class="stat-card"><div class="stat-head"><span>خطاها</span><span class="stat-icon red">!</span></div><strong id="statErrors">0</strong><div class="stat-foot">خطاهای ثبت‌شده در اجرا</div></article>
     <article class="stat-card"><div class="stat-head"><span>تکمیل جزئیات</span><span class="stat-icon gold">✧</span></div><strong id="statDetails">0 <small>صفحه محصول</small></strong><div class="stat-foot">بازدید صفحات برای توضیحات و تصویر</div></article>
     </section>
+<section class="charts-grid" aria-label="نمودارهای تحلیلی"><article class="panel chart-card"><div class="panel-title"><div><h2>روند استخراج</h2><p>تغییرات زنده صفحات و محصولات</p></div><span class="step-badge">LIVE ANALYTICS</span></div><canvas id="trendChart" height="190"></canvas></article><article class="panel chart-card"><div class="panel-title"><div><h2>سلامت منابع</h2><p>تکمیل عملیات در برابر خطاها</p></div><span class="step-badge">SOURCE HEALTH</span></div><canvas id="healthChart" height="190"></canvas></article></section>
     <div class="content-grid">
       <section class="panel config-panel" id="sources"><div class="panel-title"><div><h2>تنظیم عملیات</h2><p>منبع و تنظیمات خزش را مشخص کنید</p></div><span class="step-badge">01 / CONFIG</span></div>
         <div class="mode-tabs"><button class="mode active" data-mode="all">انتخاب شیت</button><button class="mode" data-mode="selected">فروشگاه‌های انتخابی</button><button class="mode" data-mode="manual">لینک دستی</button></div>
@@ -29,6 +30,7 @@
         <div class="field-group hidden" id="manualField"><label for="urls">آدرس‌های سایت یا صفحه</label><textarea id="urls" rows="5" placeholder="https://example.com/perfumes&#10;https://another-store.com"></textarea><small>هر URL در یک خط یا با کاما جدا شود. فقط صفحات عمومی.</small></div>
         <div class="config-divider"></div><div class="settings-grid"><div class="field-group"><label for="limit">حد محصول از هر سایت</label><input id="limit" type="number" min="0" value="10"><small>۰ یعنی بدون محدودیت</small></div><div class="field-group"><label for="pages">حداکثر صفحات هر سایت</label><input id="pages" type="number" min="1" value="12"></div><div class="field-group"><label for="delay">فاصله درخواست (ثانیه)</label><input id="delay" type="number" min="0" step="0.1" value="1.3"></div><div class="field-group"><label for="format">فرمت خروجی</label><select id="format"><option value="xlsx">Excel (.xlsx)</option><option value="csv">CSV</option><option value="json">JSON</option></select></div></div>
         <label class="toggle-row"><span class="toggle-copy"><b>تکمیل توضیحات محصول</b><small>باز کردن صفحه محصول برای استخراج توضیحات کوتاه و کامل و تکمیل تصویر و برند</small></span><input type="checkbox" id="enrichDetails" checked><span class="switch"></span></label>
+        <label class="toggle-row"><span class="toggle-copy"><b>ترجمه خودکار به فارسی</b><small>متن اصلی حفظ می‌شود؛ نیازمند تنظیم سرویس ترجمه (LibreTranslate)</small></span><input type="checkbox" id="translateFa"><span class="switch"></span></label>
         <label class="toggle-row"><span class="toggle-copy"><b>دانلود تصویر محصولات</b><small>تصاویر در پوشه خروجی ذخیره می‌شوند</small></span><input type="checkbox" id="downloadImages"><span class="switch"></span></label>
         <div class="action-row"><button class="primary-button" id="startBtn"><span>▶</span> شروع استخراج</button><button class="stop-button" id="stopBtn" disabled><span>■</span> توقف عملیات</button></div><div class="notice"><span>ⓘ</span><p>محدودیت‌های سایت‌ها و robots.txt را رعایت کنید. این ابزار برای صفحات عمومی و بررسی پژوهشی است.</p></div>
       </section>
@@ -41,6 +43,13 @@
     </div>
     <section class="panel logs-panel"><div class="panel-title"><div><h2>گزارش زنده</h2><p>پیام‌های اجرایی، صفحات بازدید شده و هشدارها</p></div><div class="log-actions"><span class="live-label"><span class="pulse-dot"></span> LIVE</span><button class="text-btn" id="clearLogs">پاک‌سازی نمایش</button></div></div><div class="logs" id="logs"><div class="log-line"><time>--:--:--</time><span class="log-info">سیستم آماده دریافت عملیات است.</span></div></div></section>
     <section class="panel results-panel" id="results"><div class="panel-title"><div><h2>محصولات استخراج‌شده</h2><p>آخرین محصولات به همراه تصویر و لینک منبع</p></div><span class="step-badge">03 / RESULTS</span></div><div class="result-toolbar"><span id="resultCount">۰ محصول</span><button class="secondary-button" id="filesBtn">↧ مشاهده فایل‌های خروجی</button><a class="secondary-button zip-button" id="downloadZip" href="/api/download-zip">دانلود همه خروجی‌ها ZIP</a></div><div class="products-grid" id="products"><div class="empty-state"><span>✧</span><b>هنوز محصولی ثبت نشده</b><small>پس از اجرای استخراج، نمونه محصولات اینجا نمایش داده می‌شود</small></div></div><div class="file-list hidden" id="fileList"></div></section>
+
+    <section class="panel databank-panel" id="databank"><div class="panel-title"><div><h2>سازنده بانک اطلاعات عطر</h2><p>ادغام فایل‌های JSON و Excel و استخراج از لینک‌های دستی برای ساخت دیتابیس یکپارچه</p></div><span class="step-badge">04 / DATA BANK</span></div>
+      <div class="databank-grid">
+        <div class="databank-card"><h3>① ادغام فایل‌های خروجی</h3><p>حداکثر ۱۰ فایل JSON یا XLSX را انتخاب کنید. فایل‌ها خوانده، فیلدها یکپارچه و محصولات تکراری با حفظ اطلاعات کامل‌تر ادغام می‌شوند.</p><input id="bankFiles" type="file" accept=".json,.xlsx,.csv,application/json" multiple><small id="bankFileLabel">فایلی انتخاب نشده</small><button class="primary-button" id="mergeFilesBtn">ادغام فایل‌ها و ساخت بانک</button></div>
+        <div class="databank-card"><h3>② استخراج لینک‌های دستی</h3><p>آدرس صفحات فروشگاه یا محصولات را وارد کنید؛ نتایج در بانک اطلاعات ذخیره می‌شوند.</p><textarea id="bankUrls" rows="5" placeholder="https://example.com/perfumes&#10;https://another-shop.com/collections/fragrance"></textarea><div class="bank-settings"><label>محصول از هر سایت <input id="bankLimit" type="number" min="0" value="100"></label><label>حد صفحات <input id="bankPages" type="number" min="1" value="20"></label></div><button class="primary-button" id="scrapeBankBtn">استخراج لینک‌ها و افزودن به بانک</button></div>
+      </div><div class="databank-result" id="bankResult"><div class="empty-state"><span>▣</span><b>بانک اطلاعات هنوز ساخته نشده</b><small>فایل‌ها را ادغام کنید یا لینک‌های دستی بدهید</small></div></div><div class="bank-downloads hidden" id="bankDownloads"></div>
+    </section>
     <footer><span>Perfume Scraper <i>•</i> MIT License</span><span>توسعه‌دهنده <b>هادی رسولی</b></span></footer>
   </main>
 </div>
