@@ -1,12 +1,14 @@
 """Local browser dashboard for the perfume scraper. Only binds to localhost by default."""
 from __future__ import annotations
-import argparse, csv, json, threading, webbrowser, zipfile, io
+import argparse, csv, json, threading, webbrowser, zipfile, io, re, email
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, unquote
+from email.parser import BytesParser
+from email.policy import default as email_policy
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
-from .core import load_store_sources, scrape_url, load_brands, enrich_brand, write_output, create_session
+from .core import load_store_sources, scrape_url, load_brands, enrich_brand, write_output, create_session, translate_products
 
 
 ROOT = Path.cwd()
@@ -143,6 +145,15 @@ def _worker_run(config):
     try:
         if BRAND_BOOK.exists(): enrich_brand(all_products,load_brands(str(BRAND_BOOK)))
     except Exception as exc: _log(f'تطبیق برندها انجام نشد: {exc}','warning')
+    if config.get('translate_fa'):
+        if not __import__('os').environ.get('LIBRETRANSLATE_URL'):
+            _log('ترجمه فعال است اما LIBRETRANSLATE_URL تنظیم نشده؛ متن اصلی حفظ شد و ترجمه‌ها خالی می‌مانند','warning')
+        else:
+            _log('ترجمه فارسی متن‌های محصول آغاز شد')
+            try:
+                translated=translate_products(all_products)
+                _log(f'ترجمه انجام شد: {translated} فیلد؛ متن اصلی در خروجی حفظ شده')
+            except Exception as exc: _log(f'خطا در ترجمه: {exc}','warning')
     fmt=config.get('format','xlsx')
     try:
         product_path=write_output(all_products,fmt,outdir)
@@ -167,6 +178,89 @@ def _worker_run(config):
     _log(f"خروجی نهایی ساخته شد: {product_path}")
     _log('عملیات با درخواست کاربر متوقف شد' if CANCEL_EVENT.is_set() else 'عملیات تکمیل شد')
 
+
+BANK_LOCK=threading.RLock()
+BANK_STATE={'state':'idle','products':0,'current':'','logs':[],'unique_products':0,'input_products':0,'duplicates':0,'files_processed':0,'message':'','downloads':[]}
+BANK_DIR=OUTPUT_ROOT/'databank'
+BANK_FIELDS=['name','brand','price','currency','product_url','image_url','short_description','long_description','description','site','matched_brand','source_type','availability','image_path']
+def _bank_log(s):
+    with BANK_LOCK: BANK_STATE['logs'].append(str(s)); BANK_STATE['logs']=BANK_STATE['logs'][-100:]
+def _bank_rows_from_json(obj):
+    if isinstance(obj,list): return [x for x in obj if isinstance(x,dict)]
+    if isinstance(obj,dict):
+        for k in ('products','items','data','results','records'):
+            if isinstance(obj.get(k),list): return [x for x in obj[k] if isinstance(x,dict)]
+        if all(not isinstance(v,(dict,list)) for v in obj.values()): return [obj]
+    return []
+def _read_bank_file(name,data):
+    ext=Path(name).suffix.lower()
+    if ext=='.json': return _bank_rows_from_json(json.loads(data.decode('utf-8-sig')))
+    if ext in ('.xlsx','.xlsm'):
+        from openpyxl import load_workbook
+        wb=load_workbook(io.BytesIO(data),read_only=True,data_only=True); rows=[]
+        for ws in wb.worksheets:
+            vals=list(ws.iter_rows(values_only=True))
+            if not vals: continue
+            headers=[str(x or '').strip() for x in vals[0]]
+            for row in vals[1:]:
+                item={headers[i]:row[i] for i in range(min(len(headers),len(row))) if headers[i] and row[i] is not None}
+                if item: rows.append(item)
+        return rows
+    if ext=='.csv':
+        text=data.decode('utf-8-sig'); return list(csv.DictReader(io.StringIO(text)))
+    raise ValueError(f'فرمت پشتیبانی نشده: {name}')
+def _bank_norm_key(row):
+    url=str(row.get('product_url') or row.get('url') or '').strip().lower().rstrip('/')
+    if url: return 'url:'+url
+    name=re.sub(r'\s+',' ',str(row.get('name') or row.get('product') or row.get('title') or '').strip().lower())
+    brand=re.sub(r'\s+',' ',str(row.get('brand') or '').strip().lower())
+    return ('name:'+brand+'|'+name) if name else None
+def _bank_clean(row):
+    aliases={'product':'name','title':'name','product_name':'name','productname':'name','brand_name':'brand','url':'product_url','product_link':'product_url','link':'product_url','image':'image_url','image_link':'image_url','photo':'image_url','desc':'description','details':'long_description','summary':'short_description','store':'site','source':'site'}
+    out={}
+    for k,v in row.items():
+        key=str(k or '').strip().lower().replace(' ','_')
+        key=aliases.get(key,key)
+        if v is None: continue
+        if isinstance(v,float) and v.is_integer(): v=int(v)
+        value=str(v).strip() if not isinstance(v,(int,float,bool)) else v
+        if value not in ('',None): out[key]=value
+    # copy description into short when available, and vice versa only when missing
+    if out.get('description') and not out.get('short_description'): out['short_description']=out['description']
+    return out
+def _bank_merge(rows):
+    merged={}; duplicates=0
+    for raw in rows:
+        r=_bank_clean(raw); key=_bank_norm_key(r)
+        if not key: continue
+        if key not in merged: merged[key]=r; continue
+        duplicates+=1; old=merged[key]
+        # Keep existing values; fill blanks. Prefer richer descriptions if longer.
+        for k,v in r.items():
+            if not old.get(k): old[k]=v
+            elif k in ('description','short_description','long_description') and len(str(v))>len(str(old.get(k,''))): old[k]=v
+        # combine distinct source provenance values
+        if r.get('site') and r['site']!=old.get('site'):
+            old['site']=('; '.join(dict.fromkeys([str(old.get('site','')),str(r['site'])])).strip('; '))
+    return list(merged.values()),duplicates
+def _bank_save(rows,folder_name='bank-final'):
+    BANK_DIR.mkdir(parents=True,exist_ok=True)
+    master_dir=BANK_DIR/'master'; master_dir.mkdir(parents=True,exist_ok=True)
+    master_json=master_dir/'perfume-database.json'
+    existing=[]
+    if master_json.exists():
+        try: existing=_bank_rows_from_json(json.loads(master_json.read_text(encoding='utf-8')))
+        except Exception: existing=[]
+    batch, batch_duplicates=_bank_merge(rows)
+    combined,duplicates=_bank_merge(existing+rows)
+    snapshot=BANK_DIR/folder_name; snapshot.mkdir(parents=True,exist_ok=True)
+    # Master database accumulates across import and manual-link runs, while a dated snapshot preserves each run.
+    for ext in ('json','xlsx','csv'):
+        write_output(combined,ext,str(master_dir),filename='perfume-database')
+        write_output(batch,ext,str(snapshot),filename='batch-products')
+    outputs=[{'label':'MASTER '+ext.upper(),'url':'/files/run-output/databank/master/perfume-database.'+ext} for ext in ('json','xlsx','csv')]
+    return combined,duplicates,outputs
+
 class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args): pass
     def _json(self, data, code=200):
@@ -179,6 +273,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path=urlparse(self.path).path
         if path=='/api/status': self._json(_state_copy()); return
+        if path=='/api/databank/status':
+            with BANK_LOCK: self._json(dict(BANK_STATE)); return
         if path=='/api/sources':
             region=parse_qs(urlparse(self.path).query).get('region',['all'])[0]
             try: self._json({'regions':REGIONS,'sources':_sources(region)})
@@ -217,7 +313,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._json({'error':'not found'},404)
     def do_POST(self):
         global WORKER
-        path=urlparse(self.path).path; data=self._read_json()
+        path=urlparse(self.path).path; data={} if path=='/api/databank/import' else self._read_json()
         if path=='/api/start':
             with STATE_LOCK:
                 if STATE['state']=='running': self._json({'error':'یک عملیات در حال اجرا است'},409); return
@@ -232,6 +328,63 @@ class DashboardHandler(BaseHTTPRequestHandler):
             CANCEL_EVENT.clear()
             WORKER=threading.Thread(target=_worker_run,args=(data,),daemon=True); WORKER.start()
             self._json({'ok':True,'message':'شروع شد'}); return
+
+        if path=='/api/databank/import':
+            ctype=self.headers.get('Content-Type',''); length=int(self.headers.get('Content-Length','0'))
+            if length<=0 or length>80*1024*1024: self._json({'error':'حجم درخواست نامعتبر است؛ مجموع فایل‌ها حداکثر ۸۰ مگابایت'},413); return
+            raw=self.rfile.read(length)
+            try:
+                boundary_match=re.search(r'boundary=([^;]+)',ctype)
+                if not boundary_match: raise ValueError('مرز فایل multipart نامعتبر است')
+                boundary=boundary_match.group(1).strip(' \u0022') .encode()
+                files=[]
+                for segment in raw.split(b'--'+boundary):
+                    segment=segment.strip(b'\r\n')
+                    if not segment or segment==b'--': continue
+                    header_blob,payload=segment.split(b'\r\n\r\n',1)
+                    header_text=header_blob.decode('latin-1',errors='replace')
+                    filename_match=re.search(r'filename=\"([^\"]+)\"|filename=([^;\r\n]+)',header_text,re.I)
+                    if filename_match:
+                        filename=(filename_match.group(1) or filename_match.group(2)).strip()
+                        payload=payload.rstrip(b'\r\n')
+                        files.append((filename,payload))
+                if not files: raise ValueError('فایل آپلود شده دریافت نشد')
+                if len(files)>10: raise ValueError('حداکثر ۱۰ فایل در هر نوبت مجاز است')
+                rows=[]
+                for name,data in files:
+                    rows.extend(_read_bank_file(name,data))
+                merged,dups,downloads=_bank_save(rows,datetime.now().strftime('import-%Y%m%d-%H%M%S'))
+                self._json({'ok':True,'files_processed':len(files),'input_products':len(rows),'unique_products':len(merged),'duplicates':dups,'message':'ادغام انجام شد؛ فایل‌ها به بانک اطلاعاتی تبدیل شدند.','downloads':downloads}); return
+            except Exception as exc: self._json({'error':str(exc)},400); return
+        if path=='/api/databank/scrape':
+            with BANK_LOCK:
+                if BANK_STATE.get('state')=='running': self._json({'error':'استخراج بانک در حال اجراست'},409); return
+                BANK_STATE.update({'state':'running','products':0,'current':'در صف شروع','logs':[],'message':'در حال استخراج لینک‌ها','downloads':[]})
+            urls=[x.strip() for x in str(data.get('urls','')).replace(';','\n').replace(',','\n').splitlines() if x.strip()]
+            urls=list(dict.fromkeys(urls))
+            if not urls:
+                with BANK_LOCK: BANK_STATE.update({'state':'idle'})
+                self._json({'error':'لینک وارد نشده'},400); return
+            limit=max(0,int(data.get('limit',100))); pages=max(1,int(data.get('pages',20)))
+            def run_bank():
+                allrows=[]
+                for url in urls:
+                    if not url.startswith(('http://','https://')): url='https://'+url
+                    host=urlparse(url).netloc
+                    with BANK_LOCK: BANK_STATE['current']=url
+                    _bank_log('شروع: '+url)
+                    try:
+                        products,stats=scrape_url(url,site_name=host,limit=limit,download_images=False,delay=1.2,max_pages=pages,session=create_session(),enrich_details=True)
+                        allrows.extend(products); _bank_log(f"{host}: {len(products)} محصول، {stats.get('pages_checked',0)} صفحه، {stats.get('errors',0)} خطا")
+                    except Exception as exc: _bank_log(f'خطا در {host}: {exc}')
+                try:
+                    merged,dups,downloads=_bank_save(allrows,datetime.now().strftime('links-%Y%m%d-%H%M%S'))
+                    with BANK_LOCK: BANK_STATE.update({'state':'finished','products':len(allrows),'input_products':len(allrows),'unique_products':len(merged),'duplicates':dups,'files_processed':len(urls),'message':'استخراج و ذخیره بانک تمام شد','downloads':downloads,'current':''})
+                except Exception as exc:
+                    _bank_log('خطا در ساخت فایل خروجی: '+str(exc))
+                    with BANK_LOCK: BANK_STATE.update({'state':'failed','message':str(exc)})
+            threading.Thread(target=run_bank,daemon=True).start(); self._json({'ok':True,'state':'running'}); return
+
         if path=='/api/cancel':
             with STATE_LOCK:
                 if STATE['state'] not in ('running','starting'): self._json({'error':'عملیاتی برای توقف وجود ندارد'},409); return
