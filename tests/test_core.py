@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 from bs4 import BeautifulSoup
-from perfume_scraper.core import _product_from_jsonld, load_sources, normalize, create_session
+from perfume_scraper.core import _product_from_jsonld, load_sources, normalize, create_session, _split_description, _clean_text, enrich_product_details
 
 WORKBOOK=Path(__file__).parents[1]/'data'/'perfume-brands-by-country.xlsx'
 
@@ -22,6 +22,8 @@ def test_jsonld_product_extraction():
     assert item['brand']=='Test Brand'
     assert item['price']=='100'
     assert item['image_url']=='https://shop.test/p.jpg'
+    assert item['short_description']==''
+    assert item['long_description']==''
 
 def test_normalize():
     assert normalize('CHANEL') == 'chanel'
@@ -36,3 +38,27 @@ def test_create_session_has_retrying_http_adapters():
         assert session.get_adapter('http://').max_retries.total == 3
     finally:
         session.close()
+
+
+def test_description_split_and_html_cleanup():
+    raw='<p>Perfume <strong>description</strong> with details</p>'
+    assert _clean_text(raw)=='Perfume description with details'
+    short, long = _split_description('A' * 400)
+    assert len(short)==320 and len(long)==400
+
+
+def test_enrich_product_detail_page_extracts_descriptions_image_and_brand(monkeypatch):
+    class FakeResponse:
+        headers = {"content-type": "text/html; charset=utf-8"}
+        text = """<html><head><meta name="description" content="Short SEO description"></head>
+        <body><h1>Full Perfume Title</h1><div class="product-description"><p>Long perfume description with notes and story, longer than twenty characters.</p></div>
+        <img class="product-image" data-src="/assets/product.webp"><span class="product-brand">Test House</span></body></html>"""
+    monkeypatch.setattr("perfume_scraper.core._get", lambda *args, **kwargs: FakeResponse())
+    product = {"site":"Demo", "name":"Perfume", "product_url":"https://demo.test/p/", "image_url":"", "brand":"", "description":"", "short_description":"", "long_description":""}
+    count = enrich_product_details(object(), [product], max_details=1)
+    assert count == 1
+    assert product["name"] == "Full Perfume Title"
+    assert product["short_description"] == "Short SEO description"
+    assert "Long perfume description" in product["long_description"]
+    assert product["image_url"] == "https://demo.test/assets/product.webp"
+    assert product["brand"] == "Test House"
