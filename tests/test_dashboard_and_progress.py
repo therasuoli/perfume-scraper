@@ -122,3 +122,24 @@ def test_manual_url_source_parsing():
     assert len(parsed) == 2
     assert parsed[0]["url"] == "https://shop.one/perfume"
     assert parsed[1]["url"] == "https://shop.two/catalog"
+
+
+def test_dashboard_download_zip_returns_output_bundle(monkeypatch, tmp_path):
+    import threading, zipfile, io
+    from urllib.request import urlopen
+    from perfume_scraper.ui_server import DashboardHandler
+    from http.server import ThreadingHTTPServer
+    outdir=tmp_path / "run-output"
+    outdir.mkdir()
+    (outdir / "products.json").write_text("[]",encoding="utf-8")
+    monkeypatch.setattr("perfume_scraper.ui_server.ROOT",tmp_path)
+    monkeypatch.setattr("perfume_scraper.ui_server.OUTPUT_ROOT",outdir)
+    server=ThreadingHTTPServer(("127.0.0.1",0),DashboardHandler)
+    thread=threading.Thread(target=server.serve_forever,daemon=True); thread.start()
+    try:
+        with urlopen(f"http://127.0.0.1:{server.server_address[1]}/api/download-zip",timeout=3) as response:
+            assert response.status==200
+            payload=zipfile.ZipFile(io.BytesIO(response.read()))
+            assert "products.json" in payload.namelist()
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=2)
