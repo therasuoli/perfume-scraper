@@ -176,7 +176,7 @@ def _worker_run(config):
         (outdir/'run-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
         with (outdir/'source-summary.csv').open('w',newline='',encoding='utf-8-sig') as fp:
             cols=['name','url','source_type','status','pages_checked','products_found','errors','error']
-            writer=csv.DictWriter(fp,fieldnames=cols); writer.writeheader(); writer.writerows(source_reports)
+            writer=csv.DictWriter(fp,fieldnames=cols,extrasaction='ignore'); writer.writeheader(); writer.writerows(source_reports)
     except Exception as exc:
         _log(f'خطا هنگام ساخت خروجی: {exc}','error')
         with STATE_LOCK: STATE.update({'state':'failed','message':str(exc),'finished_at':datetime.now().isoformat(timespec='seconds'),'current_site':''})
