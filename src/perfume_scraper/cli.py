@@ -164,7 +164,7 @@ def main() -> None:
     )
     with (outdir / "source-summary.csv").open("w", newline="", encoding="utf-8-sig") as handle:
         fields = ["name", "url", "source_type", "status", "pages_checked", "products_found", "errors", "error"]
-        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(report)
 
