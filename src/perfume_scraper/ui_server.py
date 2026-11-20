@@ -8,7 +8,8 @@ from email.parser import BytesParser
 from email.policy import default as email_policy
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
-from .core import load_store_sources, scrape_url, load_brands, enrich_brand, write_output, create_session, translate_products
+from .core import load_store_sources, scrape_url, load_brands, enrich_brand, write_output, create_session, translate_products, classify_product
+from .scento_api import import_scento
 
 
 ROOT = Path.cwd()
@@ -142,6 +143,7 @@ def _worker_run(config):
         key=item.get('product_url') or f"{item.get('site')}|{item.get('name')}"
         if key not in dedup or (not dedup[key].get('image_url') and item.get('image_url')): dedup[key]=item
     all_products=list(dedup.values())
+    all_products=[classify_product(item) for item in all_products]
     try:
         if BRAND_BOOK.exists(): enrich_brand(all_products,load_brands(str(BRAND_BOOK)))
     except Exception as exc: _log(f'تطبیق برندها انجام نشد: {exc}','warning')
@@ -154,11 +156,23 @@ def _worker_run(config):
                 translated=translate_products(all_products)
                 _log(f'ترجمه انجام شد: {translated} فیلد؛ متن اصلی در خروجی حفظ شده')
             except Exception as exc: _log(f'خطا در ترجمه: {exc}','warning')
+    # Auto-publish scraped products to the Larsi Supabase catalogue when configured.
+    supabase_sync_report={'status':'skipped','reason':'Supabase secrets not configured'}
+    import os
+    if os.getenv('SUPABASE_URL') and (os.getenv('SUPABASE_SERVICE_ROLE_KEY') or os.getenv('SUPABASE_SERVICE_KEY')):
+        try:
+            from .supabase_sync import sync_products
+            supabase_sync_report={'status':'ok', **sync_products(all_products)}
+            _log(f"ذخیره خودکار در Supabase لارسی موفق: {supabase_sync_report['uploaded']} محصول", 'info')
+        except Exception as exc:
+            supabase_sync_report={'status':'error','error':str(exc)}
+            _log(f"خطا در ذخیره Supabase: {exc}", 'error')
     fmt=config.get('format','xlsx')
     try:
         product_path=write_output(all_products,fmt,outdir)
         report={'mode':config.get('mode'),'region':config.get('region'),'sources_total':len(sources),
-            'total_products':len(all_products),'cancelled':CANCEL_EVENT.is_set(),'source_results':source_reports}
+            'total_products':len(all_products),'cancelled':CANCEL_EVENT.is_set(),'source_results':source_reports,
+            'supabase_sync':supabase_sync_report}
         (outdir/'run-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
         with (outdir/'source-summary.csv').open('w',newline='',encoding='utf-8-sig') as fp:
             cols=['name','url','source_type','status','pages_checked','products_found','errors','error']
@@ -182,7 +196,7 @@ def _worker_run(config):
 BANK_LOCK=threading.RLock()
 BANK_STATE={'state':'idle','products':0,'current':'','logs':[],'unique_products':0,'input_products':0,'duplicates':0,'files_processed':0,'message':'','downloads':[]}
 BANK_DIR=OUTPUT_ROOT/'databank'
-BANK_FIELDS=['name','brand','price','currency','product_url','image_url','short_description','long_description','description','site','matched_brand','source_type','availability','image_path']
+BANK_FIELDS=['name','brand','price','currency','product_url','image_url','short_description','long_description','description','site','matched_brand','source_type','availability','image_path','country','country_of_origin','category','family','secondary_family','top','heart','base','notes','accords','perfumer','year','season','concentration']
 def _bank_log(s):
     with BANK_LOCK: BANK_STATE['logs'].append(str(s)); BANK_STATE['logs']=BANK_STATE['logs'][-100:]
 def _bank_rows_from_json(obj):
@@ -210,13 +224,14 @@ def _read_bank_file(name,data):
         text=data.decode('utf-8-sig'); return list(csv.DictReader(io.StringIO(text)))
     raise ValueError(f'فرمت پشتیبانی نشده: {name}')
 def _bank_norm_key(row):
+    # Product identity uses normalized brand+name first; URLs are fallback only.
+    name=re.sub(r'[^a-z0-9\u0600-\u06ff]+','',str(row.get('name') or row.get('product') or row.get('title') or '').casefold())
+    brand=re.sub(r'[^a-z0-9\u0600-\u06ff]+','',str(row.get('brand') or row.get('matched_brand') or '').casefold())
+    if name: return 'name:'+brand+'|'+name
     url=str(row.get('product_url') or row.get('url') or '').strip().lower().rstrip('/')
-    if url: return 'url:'+url
-    name=re.sub(r'\s+',' ',str(row.get('name') or row.get('product') or row.get('title') or '').strip().lower())
-    brand=re.sub(r'\s+',' ',str(row.get('brand') or '').strip().lower())
-    return ('name:'+brand+'|'+name) if name else None
+    return 'url:'+url if url else None
 def _bank_clean(row):
-    aliases={'product':'name','title':'name','product_name':'name','productname':'name','brand_name':'brand','url':'product_url','product_link':'product_url','link':'product_url','image':'image_url','image_link':'image_url','photo':'image_url','desc':'description','details':'long_description','summary':'short_description','store':'site','source':'site'}
+    aliases={'product':'name','title':'name','product_name':'name','productname':'name','brand_name':'brand','url':'product_url','product_link':'product_url','link':'product_url','image':'image_url','image_link':'image_url','photo':'image_url','desc':'description','details':'long_description','summary':'short_description','store':'site','source':'site','country_of_origin':'country','origin_country':'country','made_in':'country','manufacturer_country':'country','scent_family':'family','categories':'category'}
     out={}
     for k,v in row.items():
         key=str(k or '').strip().lower().replace(' ','_')
@@ -227,7 +242,8 @@ def _bank_clean(row):
         if value not in ('',None): out[key]=value
     # copy description into short when available, and vice versa only when missing
     if out.get('description') and not out.get('short_description'): out['short_description']=out['description']
-    return out
+    if out.get('long_description') and not out.get('description'): out['description']=out['long_description']
+    return classify_product(out)
 def _bank_merge(rows):
     merged={}; duplicates=0
     for raw in rows:
@@ -260,6 +276,16 @@ def _bank_save(rows,folder_name='bank-final'):
         write_output(batch,ext,str(snapshot),filename='batch-products')
     outputs=[{'label':'MASTER '+ext.upper(),'url':'/files/run-output/databank/master/perfume-database.'+ext} for ext in ('json','xlsx','csv')]
     return combined,duplicates,outputs
+
+def _auto_sync_bank(rows):
+    """Publish imported bank rows to the Larsi Supabase table when credentials exist."""
+    import os
+    if not (os.getenv('SUPABASE_URL') and (os.getenv('SUPABASE_SERVICE_ROLE_KEY') or os.getenv('SUPABASE_SERVICE_KEY'))):
+        return {'status':'skipped','reason':'Supabase credentials are not configured'}
+    from .supabase_sync import sync_products
+    return {'status':'ok', **sync_products(rows)}
+
+
 
 class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args): pass
@@ -354,7 +380,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 for name,data in files:
                     rows.extend(_read_bank_file(name,data))
                 merged,dups,downloads=_bank_save(rows,datetime.now().strftime('import-%Y%m%d-%H%M%S'))
-                self._json({'ok':True,'files_processed':len(files),'input_products':len(rows),'unique_products':len(merged),'duplicates':dups,'message':'ادغام انجام شد؛ فایل‌ها به بانک اطلاعاتی تبدیل شدند.','downloads':downloads}); return
+                sync_report=_auto_sync_bank(rows)
+                self._json({'ok':True,'supabase_sync':sync_report,'files_processed':len(files),'input_products':len(rows),'unique_products':len(merged),'duplicates':dups,'message':'ادغام انجام شد؛ فایل‌ها به بانک اطلاعاتی تبدیل شدند.','downloads':downloads}); return
             except Exception as exc: self._json({'error':str(exc)},400); return
         if path=='/api/databank/scrape':
             with BANK_LOCK:
@@ -379,11 +406,39 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     except Exception as exc: _bank_log(f'خطا در {host}: {exc}')
                 try:
                     merged,dups,downloads=_bank_save(allrows,datetime.now().strftime('links-%Y%m%d-%H%M%S'))
+                    sync_report=_auto_sync_bank(allrows)
+                    _bank_log(f"ارسال به Supabase: {sync_report.get('uploaded',0)} محصول ({sync_report.get('status')})")
                     with BANK_LOCK: BANK_STATE.update({'state':'finished','products':len(allrows),'input_products':len(allrows),'unique_products':len(merged),'duplicates':dups,'files_processed':len(urls),'message':'استخراج و ذخیره بانک تمام شد','downloads':downloads,'current':''})
                 except Exception as exc:
                     _bank_log('خطا در ساخت فایل خروجی: '+str(exc))
                     with BANK_LOCK: BANK_STATE.update({'state':'failed','message':str(exc)})
             threading.Thread(target=run_bank,daemon=True).start(); self._json({'ok':True,'state':'running'}); return
+
+        if path=='/api/databank/scento-import':
+            with BANK_LOCK:
+                if BANK_STATE.get('state')=='running': self._json({'error':'بانک در حال اجرای عملیات است'},409); return
+                BANK_STATE.update({'state':'running','products':0,'current':'در حال جستجو در API سنتو','logs':[],'message':'شروع استخراج API','downloads':[]})
+            queries=str(data.get('queries','')).strip()
+            if not queries:
+                with BANK_LOCK: BANK_STATE.update({'state':'idle'})
+                self._json({'error':'عبارت‌های جستجو را وارد کنید'},400); return
+            limit=max(1,min(int(data.get('limit',150)),1000))
+            delay=max(0.15,min(float(data.get('delay',0.35)),5.0))
+            def run_scento():
+                try:
+                    def api_progress(message):
+                        with BANK_LOCK:
+                            BANK_STATE['current']=str(message)
+                            BANK_STATE['logs']=(BANK_STATE.get('logs',[])+[str(message)])[-100:]
+                    items,stats=import_scento(queries,limit=limit,progress=api_progress,request_delay=delay)
+                    merged,dups,downloads=_bank_save(items,datetime.now().strftime('scento-api-%Y%m%d-%H%M%S'))
+                    sync_report=_auto_sync_bank(items)
+                    api_progress(f"ذخیره Supabase: {sync_report.get('uploaded',0)} محصول ({sync_report.get('status')})")
+                    with BANK_LOCK: BANK_STATE.update({'state':'finished','products':len(items),'input_products':len(items),'unique_products':len(merged),'duplicates':dups,'files_processed':stats.get('queries',0),'message':f"استخراج API سنتو انجام شد؛ {len(items)} محصول دریافت شد",'downloads':downloads,'current':'','api_stats':stats,'supabase_sync':sync_report})
+                except Exception as exc:
+                    api_progress('خطا: '+str(exc))
+                    with BANK_LOCK: BANK_STATE.update({'state':'failed','message':str(exc),'current':''})
+            threading.Thread(target=run_scento,daemon=True).start(); self._json({'ok':True,'state':'running'}); return
 
         if path=='/api/cancel':
             with STATE_LOCK:
