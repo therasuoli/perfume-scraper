@@ -25,3 +25,12 @@ def test_sync_requires_supabase_secrets(monkeypatch):
         assert "SUPABASE_URL" in str(exc)
     else:
         assert False, "Should require credentials"
+
+
+def test_distinct_products_get_collision_resistant_ids():
+    a = to_payload({"name": "Sauvage Eau de Toilette", "brand": "Dior", "product_url": "https://shop.test/product/sauvage"})
+    b = to_payload({"name": "Sauvage Elixir", "brand": "Dior", "product_url": "https://shop.test/product/sauvage"})
+    c = to_payload({"name": "Sauvage Eau de Toilette", "brand": "Dior", "product_url": "https://shop.test/product/sauvage"})
+    assert a["id"] != b["id"]
+    assert a["id"] == c["id"]  # stable across repeated runs for the same source URL
+    assert len(a["id"]) <= 80
