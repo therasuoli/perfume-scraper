@@ -157,3 +157,26 @@ set LIBRETRANSLATE_API_KEY=your-key-if-required
 start-dashboard.bat
 ```
 Replace the example URL and key with your translation provider's actual settings. The dashboard will keep original English text and add Persian fields when translation is enabled.
+
+
+## ذخیره خودکار محصولات در Supabase لارسی پرفیوم
+
+در صورت تنظیم متغیرهای محیطی، پس از پایان استخراج، محصولات به‌صورت خودکار در جدول `public.perfumes` پروژه لارسی ذخیره/به‌روزرسانی (Upsert) می‌شوند. کلید سرویس فقط در Secrets/Environment نگهداری شود و هرگز در فایل‌های پروژه یا مرورگر قرار نگیرد.
+
+### GitHub Actions
+در Settings → Secrets and variables → Actions دو Repository secret اضافه کنید:
+- `SUPABASE_URL` : آدرس پروژه Supabase
+- `SUPABASE_SERVICE_ROLE_KEY` : کلید Service Role (فقط Secret؛ در اختیار برنامه وب قرار نگیرد)
+
+بعد از این تنظیم، workflow استخراج، محصولات را به جدول `perfumes` ارسال می‌کند. شناسه محصول بر اساس URL محصول ساخته می‌شود تا اجرای دوباره باعث ایجاد رکورد تکراری نشود؛ upsert رکورد موجود را با داده تازه ادغام/به‌روزرسانی می‌کند.
+
+### داشبورد محلی و CLI
+برای ذخیره خودکار در اجرای محلی نیز همین دو متغیر را در Environment سیستم تعریف کنید. در صورت نبود credentials، استخراج و خروجی فایل همچنان انجام می‌شود و Sync صرف‌نظر می‌شود. برای غیرفعال‌کردن Sync در CLI از `--no-supabase-sync` استفاده کنید.
+
+**ساختار مقصد:** `public.perfumes(id text primary key, payload jsonb, updated_at timestamptz)`. داده محصول داخل `payload` قرار می‌گیرد؛ کلید Service Role لازم است چون سیاست دیتابیس نوشتن عمومی را بسته نگه می‌دارد.
+
+## Scento API import (optional)
+
+The dashboard's Data Bank Builder includes a query-based Scento REST import. Enter search terms (one per line), choose a maximum product count, and run the import. It requests public search results and individual perfume portraits at a respectful interval; images may be read from Scento page metadata when exposed. The imported products are normalized, deduplicated into the local master JSON/XLSX/CSV, and upserted into Supabase when `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (or `SUPABASE_SERVICE_KEY`) are configured. It is search-based, not a full database mirror. Please review Scento's API terms and attribution requirements before importing or republishing data: https://www.scento.com/terms-of-service#perfume-api.
+
+New product fields include country/country_of_origin, family/category, secondary family, concentration, character/accords, note pyramid, and descriptions. Unknown country values remain empty rather than guessed.
