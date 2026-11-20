@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--delay", type=float, default=1.0)
     parser.add_argument("--max-pages", type=int, default=40)
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--no-supabase-sync", action="store_true", help="غیرفعال کردن ذخیره خودکار در Supabase")
     return parser
 
 
@@ -143,6 +144,21 @@ def main() -> None:
         "total_products": len(all_items),
         "source_results": report,
     }
+    # Auto-sync to the Larsi Supabase catalogue when credentials are configured.
+    import os
+    if not args.no_supabase_sync and (os.getenv("SUPABASE_URL") or "https://eixzihvihoammvremxrl.supabase.co") and (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY")):
+        try:
+            from .supabase_sync import sync_products
+            sync_result = sync_products(all_items)
+            run_report["supabase_sync"] = {"status": "ok", **sync_result}
+            logging.info("Supabase لارسی: %d محصول upsert شد", sync_result["uploaded"])
+        except Exception as exc:
+            run_report["supabase_sync"] = {"status": "error", "error": str(exc)}
+            logging.exception("ذخیره خودکار در Supabase شکست خورد")
+            (outdir / "run-report.json").write_text(json.dumps(run_report, ensure_ascii=False, indent=2), encoding="utf-8")
+            raise
+    else:
+        run_report["supabase_sync"] = {"status": "skipped", "reason": "Supabase secrets not configured or sync disabled"}
     (outdir / "run-report.json").write_text(
         json.dumps(run_report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
