@@ -110,6 +110,9 @@ jobs:
           FORMAT: ${{ inputs.output_format }}
           DOWNLOAD_IMAGES: ${{ inputs.download_images }}
           ENRICH_DETAILS: ${{ inputs.enrich_details }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL || 'https://eixzihvihoammvremxrl.supabase.co' }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_TABLE: perfumes
         run: |
           mkdir -p run-output
           set -o pipefail
