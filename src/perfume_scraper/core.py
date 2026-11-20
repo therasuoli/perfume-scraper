@@ -393,10 +393,12 @@ def scrape_url(start_url,site_name=None,limit=0,download_images=False,image_dir=
     if enrich_details and items:
         enrich_product_details(s,items,progress_callback=progress_callback,cancel_event=cancel_event,max_details=min(len(items),40))
     if download_images:
+        image_no=0
         for i,item in enumerate(items,1):
             if cancel_event is not None and cancel_event.is_set(): break
             if item.get('image_url'):
-                try: item['image_path']=str(_download_image(s,item['image_url'],image_dir,i))
+                image_no+=1; item['image_number']=image_no
+                try: item['image_path']=str(_download_image(s,item['image_url'],image_dir,image_no))
                 except (requests.RequestException, OSError) as e: LOG.warning('تصویر دانلود نشد: %s',e)
     stats['products_found']=len(items)
     return items,stats
@@ -404,7 +406,7 @@ def scrape_url(start_url,site_name=None,limit=0,download_images=False,image_dir=
 def _same_host(a,b): return urlparse(a).netloc.lower().removeprefix('www.')==urlparse(b).netloc.lower().removeprefix('www.')
 def _download_image(session,url,folder,number):
     r=session.get(url,timeout=25); r.raise_for_status(); ct=r.headers.get('content-type','').split(';')[0].lower(); ext={'image/jpeg':'.jpg','image/png':'.png','image/webp':'.webp','image/gif':'.gif'}.get(ct,Path(urlparse(url).path).suffix or '.img')
-    folder=Path(folder); folder.mkdir(parents=True,exist_ok=True); p=folder/f'product-{number:05d}{ext}'; p.write_bytes(r.content); return p
+    folder=Path(folder); folder.mkdir(parents=True,exist_ok=True); p=folder/f'image-{number:05d}{ext}'; p.write_bytes(r.content); return p
 
 def normalize(s): return re.sub(r'[^a-z0-9]','',(s or '').casefold())
 def load_brands(path):
@@ -412,16 +414,50 @@ def load_brands(path):
     wb=load_workbook(path,data_only=True); ws=wb['برندهای عطر']; rows=list(ws.values); heads=[str(x or '').strip() for x in rows[0]]
     return [dict(zip(heads,r)) for r in rows[1:] if any(x is not None for x in r)]
 def enrich_brand(items,rows):
-    aliases={}
+    aliases={}; countries={}
     for r in rows:
-        en=str(r.get('برند (English)') or '').strip(); fa=str(r.get('برند (فارسی)') or '').strip()
-        if en: aliases[normalize(en)]=en
-        if fa: aliases[normalize(fa)]=en or fa
+        en=str(r.get('برند (English)') or r.get('Brand') or r.get('brand') or '').strip(); fa=str(r.get('برند (فارسی)') or r.get('Brand (Persian)') or '').strip()
+        country=str(r.get('کشور') or r.get('Country') or r.get('Country of Origin') or r.get('Country / Region') or r.get('country_of_origin') or r.get('کشور سازنده') or '').strip()
+        if en:
+            aliases[normalize(en)]=en
+            if country: countries[normalize(en)]=country
+        if fa:
+            aliases[normalize(fa)]=en or fa
+            if country: countries[normalize(fa)]=country
     for p in items:
         cand=normalize(p.get('brand') or p.get('name','')); hits=[v for k,v in aliases.items() if k and (k in cand or cand in k)]
-        p['matched_brand']=hits[0] if len(set(hits))==1 else ''
+        match=hits[0] if len(set(hits))==1 else ''
+        p['matched_brand']=match
+        if match and not p.get('brand'): p['brand']=match
+        if match and not (p.get('country') or p.get('country_of_origin')):
+            p['country']=countries.get(normalize(match),''); p['country_of_origin']=p['country']
     return items
+
+def classify_product(item):
+    """Categorize from captured perfume fields only; don't invent missing attributes."""
+    text=' '.join(str(item.get(k) or '') for k in ('name','description','short_description','long_description','notes','accords','family','character')).casefold()
+    mapping={
+      'woody':['woody','wood','oud','agarwood','cedar','sandalwood','vetiver','خشبی','عود','چوب'],
+      'floral':['floral','rose','jasmine','tuberose','iris','violet','گل','رز','یاس','زنبق'],
+      'amber':['amber','resin','vanilla','benzoin','warm spicy','کهربا','وانیل','رزین'],
+      'fresh/citrus':['citrus','bergamot','lemon','orange','fresh','aquatic','marine','مرکبات','دریایی','خنک'],
+      'aromatic':['aromatic','lavender','herbal','mint','sage','اسطوخودوس','گیاهی','نعناع'],
+      'leather':['leather','suede','smoky','tobacco','چرم','دودی','تنباکو'],
+      'fruity':['fruity','apple','pear','berry','cherry','peach','میوه','سیب','توت','هلو']}
+    if item.get('family'):
+        item.setdefault('category',str(item['family']))
+    elif not item.get('category'):
+        found=[cat for cat,terms in mapping.items() if any(term in text for term in terms)]
+        item['category']=found[0] if found else 'other'
+    return item
+
 def write_output(items,fmt,folder,filename='products'):
+    # Number products and images consistently in every export from this scrape run.
+    image_no=0
+    for product_no,item in enumerate(items,1):
+        item.setdefault('product_number',product_no)
+        if item.get('image_url') or item.get('image_path'):
+            image_no+=1; item.setdefault('image_number',image_no)
     folder=Path(folder); folder.mkdir(parents=True,exist_ok=True); p=folder/f'{filename}.{fmt}'
     fields=list(items[0]) if items else ['site','name','brand','price','currency','product_url','image_url','description','short_description','long_description','availability','image_path','matched_brand','source_type']
     if fmt=='json': p.write_text(json.dumps(items,ensure_ascii=False,indent=2),encoding='utf-8')
